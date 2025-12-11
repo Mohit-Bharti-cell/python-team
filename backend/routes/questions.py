@@ -11,6 +11,66 @@ import json
 
 questions_bp = Blueprint("questions", __name__)
 
+@questions_bp.route("/finalise/finalized-test", methods=["GET"])
+def get_finalized_test():
+    candidate_id = request.args.get("candidateId")
+    # job_id is not required; search all assessments for candidate_id presence
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Fetch all assessments
+        cur.execute("""
+            SELECT title, work_type, created_at, candidate_id, job_id, company, skills, location
+            FROM assessment_questions
+        """)
+        rows = cur.fetchall()
+        matching_tests = []
+        for row in rows:
+            db_candidate_ids = row[3]
+            if db_candidate_ids:
+                candidate_id_list = [cid.strip() for cid in db_candidate_ids.split(",")]
+                if candidate_id in candidate_id_list:
+                    # Parse skills as array if not None
+                    skills_val = row[6]
+                    if skills_val:
+                        if isinstance(skills_val, str):
+                            skills_list = [s.strip() for s in skills_val.split(",") if s.strip()]
+                        else:
+                            skills_list = []
+                    else:
+                        skills_list = []
+                    test = {
+                        "title": row[0],
+                        "workType": row[1],
+                        "createdAt": row[2].isoformat() if row[2] else None,
+                        "candidate_id": row[3],
+                        "job_id": row[4],
+                        "company": row[5],
+                        "skills": skills_list,
+                        "location": row[7]
+                    }
+                    matching_tests.append(test)
+        if matching_tests:
+            return jsonify(matching_tests), 200
+        else:
+            # Return a single object with all fields as null/empty
+            return jsonify([{
+                "title": None,
+                "workType": None,
+                "createdAt": None,
+                "candidate_id": None,
+                "job_id": None,
+                "company": None,
+                "skills": [],
+                "location": None
+            }]), 200
+    except Exception as e:
+        print("Error fetching assessment:", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn: conn.close()
+
 @questions_bp.route("/generate-test", methods=["POST"])
 def generate_test():
     """Generate questions based on skill selections"""
@@ -161,24 +221,66 @@ def finalize_test():
         print(f"Created at: {created_at}")
         print(f"Expires at (final): {expiry_time}")
 
-        # Insert into question_set table
-        print("\nInserting into question_set table...")
+        # Insert into generated_questions table
+        print("\nInserting into generated_questions table...")
         try:
             # Try with title and description columns
             cur.execute("""
-                INSERT INTO question_set (id, job_id, title, description, duration, created_at, expiry_time)
+                INSERT INTO generated_questions (id, job_id, title, description, duration, created_at, expiry_time)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (question_set_id, job_id, test_title, test_description, total_duration, created_at, expiry_time))
-            print("✓ question_set inserted with title and description")
+            print("✓ generated_questions inserted with title and description")
         except Exception as col_error:
             print(f"Warning: Could not insert with title/description: {col_error}")
             print("Attempting fallback insert without title/description...")
             conn.rollback()
             cur.execute("""
-                INSERT INTO question_set (id, job_id, duration, created_at, expiry_time)
+                INSERT INTO generated_questions (id, job_id, duration, created_at, expiry_time)
                 VALUES (%s, %s, %s, %s, %s)
             """, (question_set_id, job_id, total_duration, created_at, expiry_time))
-            print("✓ question_set inserted (basic format)")
+            print("✓ generated_questions inserted (basic format)")
+
+        # Insert into assessment_questions table
+        print("\nInserting into assessment_questions table...")
+        company = data.get("company", "Unknown Company")
+        location = data.get("location", "Remote")
+        work_type = data.get("workType", "Full-time")
+        # Prepare all fields for insertion
+        role_title = data.get("role_title")
+        skills = data.get("skills")
+        experience = data.get("experience")
+        work_arrangement = data.get("work_arrangement")
+        annual_compensation = data.get("annual_compensation")
+        test_start = data.get("test_start")
+        test_end = data.get("test_end")
+        question_type = data.get("question_type")
+        difficulty = data.get("difficulty")
+        skill = data.get("skill")
+        metadata = data.get("metadata")
+        candidate_id = data.get("candidate_ids")
+        job_id = data.get("job_id")
+
+        try:
+            cur.execute("""
+                INSERT INTO assessment_questions (
+                    question_set_id, title, company, location, work_type, created_at,
+                    role_title, skills, experience, work_arrangement, annual_compensation,
+                    test_start, test_end, question_type, difficulty, skill, metadata, candidate_id, job_id
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+            """,
+            (
+                question_set_id, test_title, company, location, work_type, created_at,
+                role_title, json.dumps(skills) if skills is not None else None, experience, work_arrangement, annual_compensation,
+                test_start, test_end, question_type, difficulty, skill, metadata, candidate_id, job_id
+            ))
+            print("✓ assessment_questions inserted with all fields")
+        except Exception as aq_error:
+            print(f"Warning: Could not insert into assessment_questions: {aq_error}")
+            conn.rollback()
 
         # Insert questions
         print(f"\nProcessing {len(questions)} questions...")
