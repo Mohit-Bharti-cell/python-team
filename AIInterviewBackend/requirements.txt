@@ -1,7 +1,0 @@
-fastapi
-httpx
-asyncpg
-aiofiles
-python-dotenv
-openai
-twilio
