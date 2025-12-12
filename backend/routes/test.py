@@ -5,19 +5,18 @@ import os
 import psycopg2
 import secrets
 import json
+import uuid
 from datetime import datetime
 from werkzeug.utils import secure_filename
 
-from flask import current_app, send_from_directory  # if using application factory
-
-# Ensure you have an UPLOAD_DIR configured or set a local default
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "recordings")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 test_bp = Blueprint("test", __name__)
 
-# ============================================================
-# ✅ Start Test Endpoint
-# ============================================================
+# ==============================================
+# Start Test
+# ==============================================
 @test_bp.route("/test/start/<question_set_id>", methods=["GET"])
 def start_test(question_set_id):
     conn = None
@@ -30,41 +29,31 @@ def start_test(question_set_id):
             SELECT id, content
             FROM questions
             WHERE question_set_id = %s
-              AND content->>'type' IN ('mcq', 'coding', 'audio', 'video')
-        """, (question_set_id,))
+        """, (uuid.UUID(question_set_id),))
         rows = cursor.fetchall()
 
         questions_list = []
 
-        for db_id, raw in rows:
-            # ensure raw is a dict, not a string
-            if isinstance(raw, str):
-                raw_json = json.loads(raw)
-            else:
-                raw_json = raw
-
-            q_type = raw_json.get("type")
-            inner = raw_json.get("content", {}) or {}
+        for qid, raw in rows:
+            # qid may be UUID object
+            qid_str = str(qid)
+            raw_json = json.loads(raw) if isinstance(raw, str) else raw
+            inner = raw_json.get("content", {})
 
             questions_list.append({
-                # send BOTH db id and question_id so frontend is happy
-                "id": db_id,   # <- React uses question.id
-                "question_id": raw_json.get("question_id") or db_id,
-
-                "type": q_type,
+                "id": qid_str,
+                "question_id": qid_str,
+                "type": raw_json.get("type"),
                 "skill": raw_json.get("skill"),
                 "difficulty": raw_json.get("difficulty"),
                 "time_limit": raw_json.get("time_limit"),
                 "positive_marking": raw_json.get("positive_marking"),
                 "negative_marking": raw_json.get("negative_marking"),
-
                 "question": inner.get("question"),
                 "options": inner.get("options"),
                 "correct_answer": inner.get("correct_answer"),
-
                 "prompt_text": inner.get("prompt_text"),
                 "media_url": inner.get("media_url"),
-
                 "rubric": inner.get("rubric"),
                 "suggested_time_seconds": inner.get("suggested_time_seconds"),
             })
@@ -75,22 +64,19 @@ def start_test(question_set_id):
         }), 200
 
     except Exception as e:
-        # log full traceback in Flask console
-        print("🔥 start_test error:", e, flush=True)
+        print("🔥 start_test error:", e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        if cursor: cursor.close()
+        if conn: conn.close()
 
-# ============================================================
-# ✅ Save Violations API
-# ============================================================
+# ==============================================
+# Save Violations
+# ==============================================
 @test_bp.route("/test/save_violations", methods=["POST"])
 def save_violations():
-    data = request.get_json()
+    data = request.get_json() or {}
 
     candidate_id = data.get("candidate_id")
     question_set_id = data.get("question_set_id")
@@ -119,8 +105,8 @@ def save_violations():
                 inactivities = EXCLUDED.inactivities,
                 face_not_visible = EXCLUDED.face_not_visible;
         """, (
-            candidate_id,
-            question_set_id,
+            uuid.UUID(candidate_id),
+            uuid.UUID(question_set_id),
             tab_switches,
             inactivities,
             face_not_visible
@@ -130,18 +116,16 @@ def save_violations():
         return jsonify({"message": "Violations updated"}), 200
 
     except Exception as e:
-        print("🔥 ERROR saving violations:", e, flush=True)
+        print("🔥 ERROR saving violations:", e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
-    
-# -------------------------
-# Upload audio route
-# -------------------------
+        if cur: cur.close()
+        if conn: conn.close()
+
+# ==============================================
+# Upload Audio
+# ==============================================
 @test_bp.route("/upload_audio", methods=["POST"])
 def upload_audio():
     conn = None
@@ -163,7 +147,6 @@ def upload_audio():
         except Exception:
             qa_data = []
 
-        # Save audio file
         ext = os.path.splitext(audio_file.filename)[1] or ".webm"
         ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         safe = secure_filename(f"{candidate_id}_{ts}{ext}")
@@ -174,45 +157,36 @@ def upload_audio():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Insert or update audio_url & merge qa_data (keep existing qa_data if present)
         cur.execute("""
             INSERT INTO test_attempts (
-                candidate_id, question_set_id,
-                audio_url, qa_data
-            )
-            VALUES (%s, %s, %s, %s)
+                candidate_id, question_set_id, audio_url, qa_data
+            ) VALUES (%s, %s, %s, %s)
             ON CONFLICT (candidate_id, question_set_id)
             DO UPDATE SET
                 audio_url = COALESCE(EXCLUDED.audio_url, test_attempts.audio_url),
                 qa_data = COALESCE(test_attempts.qa_data, '[]'::jsonb) || COALESCE(EXCLUDED.qa_data, '[]'::jsonb);
         """, (
-            candidate_id,
-            question_set_id,
+            uuid.UUID(candidate_id),
+            uuid.UUID(question_set_id),
             audio_url,
             json.dumps(qa_data)
         ))
 
         conn.commit()
 
-        return jsonify({
-            "status": "success",
-            "candidate_id": candidate_id,
-            "audio_url": audio_url
-        }), 200
+        return jsonify({"status": "success", "audio_url": audio_url}), 200
 
     except Exception as e:
-        print("🔥 upload_audio error:", e, flush=True)
+        print("🔥 upload_audio error:", e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
-# -------------------------
-# Upload video route
-# -------------------------
+# ==============================================
+# Upload Video
+# ==============================================
 @test_bp.route("/upload_video", methods=["POST"])
 def upload_video():
     conn = None
@@ -234,7 +208,6 @@ def upload_video():
         except Exception:
             qa_data = []
 
-        # Save video
         safe = secure_filename(video_file.filename)
         ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
         final_name = f"{candidate_id}_{ts}_{safe}"
@@ -245,49 +218,39 @@ def upload_video():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Insert or update video_url & merge qa_data (keep existing qa_data if present)
         cur.execute("""
             INSERT INTO test_attempts (
-                candidate_id, question_set_id,
-                video_url, qa_data
-            )
-            VALUES (%s, %s, %s, %s)
+                candidate_id, question_set_id, video_url, qa_data
+            ) VALUES (%s, %s, %s, %s)
             ON CONFLICT (candidate_id, question_set_id)
             DO UPDATE SET
                 video_url = COALESCE(EXCLUDED.video_url, test_attempts.video_url),
                 qa_data = COALESCE(test_attempts.qa_data, '[]'::jsonb) || COALESCE(EXCLUDED.qa_data, '[]'::jsonb);
         """, (
-            candidate_id,
-            question_set_id,
+            uuid.UUID(candidate_id),
+            uuid.UUID(question_set_id),
             video_url,
             json.dumps(qa_data)
         ))
 
         conn.commit()
 
-        return jsonify({
-            "status": "success",
-            "candidate_id": candidate_id,
-            "video_url": video_url
-        }), 200
+        return jsonify({"status": "success", "video_url": video_url}), 200
 
     except Exception as e:
-        print("🔥 upload_video error:", e, flush=True)
+        print("🔥 upload_video error:", e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        if conn: conn.close()
 
-
-# ============================================================
-# ✅ Submit Section API
-# ============================================================
+# ==============================================
+# Submit Section
+# ==============================================
 @test_bp.route("/test/submit_section", methods=["POST"])
 def submit_section():
-    data = request.get_json()
+    data = request.get_json() or {}
 
     question_set_id = data.get("question_set_id")
     section_name = data.get("section_name")
@@ -299,7 +262,6 @@ def submit_section():
 
     conn = None
     cursor = None
-
     try:
         results_out = []
 
@@ -336,8 +298,6 @@ def submit_section():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Use COALESCE so existing results_data (if any) is preserved and new results are concatenated.
-        # Also preserve existing video_url and audio_url unless the insert provides new ones (EXCLUDED).
         cursor.execute("""
             INSERT INTO test_attempts (
                 candidate_id, question_set_id, results_data
@@ -350,24 +310,166 @@ def submit_section():
                 audio_url = COALESCE(EXCLUDED.audio_url, test_attempts.audio_url),
                 qa_data = COALESCE(test_attempts.qa_data, '[]'::jsonb);
         """, (
-            candidate_id,
-            question_set_id,
+            uuid.UUID(candidate_id),
+            uuid.UUID(question_set_id),
             json.dumps(results_out)
         ))
 
         conn.commit()
 
-        return jsonify({
-            "message": "Section stored",
-            "evaluations": results_out
-        }), 200
+        return jsonify({"message": "Section stored", "evaluations": results_out}), 200
 
     except Exception as e:
-        print("🔥 submit_section error:", e, flush=True)
+        print("🔥 submit_section error:", e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+# ==============================================
+# Save Full Test Details (role, skills, exp, schedule)
+# ==============================================
+@test_bp.route("/test/save_details", methods=["POST"])
+def save_test_details():
+    data = request.get_json() or {}
+
+    candidate_id = data.get("candidate_id") or str(uuid.uuid4())
+    question_set_id = data.get("question_set_id") or str(uuid.uuid4())
+
+    role_title = data.get("role_title")
+    skills = data.get("skills")
+    experience = data.get("experience")
+    work_arrangement = data.get("work_arrangement")
+    location = data.get("location")
+    annual_compensation = data.get("annual_compensation")
+
+    test_start = data.get("test_start")  # expect ISO8601 or postgres-parsable
+    test_end = data.get("test_end")
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO candidate_test_details (
+                candidate_id, question_set_id,
+                role_title, skills, experience,
+                work_arrangement, location, annual_compensation,
+                test_start, test_end
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (candidate_id, question_set_id)
+            DO UPDATE SET
+                role_title = EXCLUDED.role_title,
+                skills = EXCLUDED.skills,
+                experience = EXCLUDED.experience,
+                work_arrangement = EXCLUDED.work_arrangement,
+                location = EXCLUDED.location,
+                annual_compensation = EXCLUDED.annual_compensation,
+                test_start = EXCLUDED.test_start,
+                test_end = EXCLUDED.test_end;
+        """, (
+            uuid.UUID(candidate_id),
+            uuid.UUID(question_set_id),
+            role_title, skills, experience,
+            work_arrangement, location, annual_compensation,
+            test_start, test_end
+        ))
+
+        conn.commit()
+        return jsonify({"message": "Test details saved successfully", "candidate_id": candidate_id, "question_set_id": question_set_id}), 200
+
+    except Exception as e:
+        print("🔥 save_details error:", e)
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+# ==============================================
+# Save Generated Questions
+# ==============================================
+@test_bp.route("/questions/save", methods=["POST"])
+def save_generated_questions():
+    data = request.get_json() or {}
+
+    question_set_id = data.get("question_set_id") or str(uuid.uuid4())
+    questions = data.get("questions", [])
+
+    if not isinstance(questions, list):
+        return jsonify({"error": "questions must be a list"}), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        for q in questions:
+            qid = uuid.uuid4()
+            # ensure content is stored under a consistent shape
+            content = q.get("content") if isinstance(q, dict) else q
+            # allow top-level fields like type/skill to be at root
+            entry = {
+                "type": q.get("type"),
+                "skill": q.get("skill"),
+                "difficulty": q.get("difficulty"),
+                "time_limit": q.get("time_limit"),
+                "positive_marking": q.get("positive_marking"),
+                "negative_marking": q.get("negative_marking"),
+                "content": content
+            }
+
+            cur.execute("""
+                INSERT INTO questions (id, question_set_id, content)
+                VALUES (%s, %s, %s)
+            """, (
+                qid,
+                uuid.UUID(question_set_id),
+                json.dumps(entry)
+            ))
+
+        conn.commit()
+        return jsonify({"message": "Questions saved successfully", "question_set_id": question_set_id}), 200
+
+    except Exception as e:
+        print("🔥 Error saving questions:", e)
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+# ==============================================
+# Optional: Create session - returns candidate_id & question_set_id
+# ==============================================
+@test_bp.route("/test/create_session", methods=["POST"])
+def create_session():
+    data = request.get_json() or {}
+    candidate_id = data.get("candidate_id") or str(uuid.uuid4())
+    question_set_id = data.get("question_set_id") or str(uuid.uuid4())
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # create a placeholder row in test_attempts so ON CONFLICT works later
+        cur.execute("""
+            INSERT INTO test_attempts (candidate_id, question_set_id)
+            VALUES (%s, %s)
+            ON CONFLICT (candidate_id, question_set_id) DO NOTHING
+        """, (uuid.UUID(candidate_id), uuid.UUID(question_set_id)))
+        conn.commit()
+
+        return jsonify({"candidate_id": candidate_id, "question_set_id": question_set_id}), 200
+
+    except Exception as e:
+        print("🔥 create_session error:", e)
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        if 'cur' in locals(): cur.close()
+        if 'conn' in locals(): conn.close()
